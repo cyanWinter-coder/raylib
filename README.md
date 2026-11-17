@@ -44,7 +44,7 @@ features
   - Multiple **Fonts** formats supported (TTF, OTF, FNT, BDF, sprite fonts)
   - **Full 3D support**, including 3D Shapes, Models, Billboards, Heightmaps and more!
   - Flexible Materials system, supporting classic maps and **PBR maps**
-  - **Animated 3D models** supported (skeletal bones animation, GPU-skinning) (IQM, M3D, glTF)
+  - **Animated 3D models** supported (skeletal bones animation, blending, masks, GPU-skinning) (IQM, M3D, glTF)
   - Shaders support, including model shaders and **postprocessing** shaders
   - **Powerful math module** for Vector, Matrix and Quaternion operations: [raymath](https://github.com/raysan5/raylib/blob/master/src/raymath.h)
   - Audio loading and playing with streaming support (WAV, QOA, OGG, MP3, FLAC, XM, MOD)
@@ -130,6 +130,7 @@ Some additional documentation about raylib design can be found in [raylib GitHub
  - [raylib architecture](https://github.com/raysan5/raylib/wiki/raylib-architecture)
  - [raylib library design](https://github.com/raysan5/raylib/wiki)
  - [raylib examples collection](https://github.com/raysan5/raylib/tree/master/examples)
+ - [skeletal animation blending](docs/ANIMATION_BLENDING.md)
  - [raylib games collection](https://github.com/raysan5/raylib-games)
 
 

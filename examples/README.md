@@ -19,7 +19,7 @@ Run the following commands from the repository root:
 - `zig build [module]` to compile all examples for a module (e.g. `zig build core`)
 - `zig build [example]` to compile _and run_ a particular example (e.g. `zig build core_basic_window`)
 
-## EXAMPLES COLLECTION [TOTAL: 223]
+## EXAMPLES COLLECTION [TOTAL: 224]
 
 ### category: core [49]
 
@@ -193,7 +193,7 @@ Examples using raylib text functionality, including sprite fonts loading/generat
 | [text_strings_management](text/text_strings_management.c) | <img src="text/text_strings_management.png" alt="text_strings_management" width="80"> | ⭐⭐⭐☆ | 6.0 | 6.0 | [David Buzatto](https://github.com/davidbuzatto) |
 | [text_animations](text/text_animations.c) | <img src="text/text_animations.png" alt="text_animations" width="80"> | ⭐☆☆☆ | 6.0 | 6.0 | [Gabriel Piangers](https://github.com/gabriel-piangers) |
 
-### category: models [32]
+### category: models [33]
 
 Examples using raylib models functionality, including models loading/generation and drawing, provided by raylib [models](../src/rmodels.c) module.
 
@@ -220,6 +220,7 @@ Examples using raylib models functionality, including models loading/generation 
 | [models_skybox_rendering](models/models_skybox_rendering.c) | <img src="models/models_skybox_rendering.png" alt="models_skybox_rendering" width="80"> | ⭐⭐☆☆ | 1.8 | 4.0 | [Ramon Santamaria](https://github.com/raysan5) |
 | [models_textured_cube](models/models_textured_cube.c) | <img src="models/models_textured_cube.png" alt="models_textured_cube" width="80"> | ⭐⭐☆☆ | 4.5 | 4.5 | [Ramon Santamaria](https://github.com/raysan5) |
 | [models_animation_gpu_skinning](models/models_animation_gpu_skinning.c) | <img src="models/models_animation_gpu_skinning.png" alt="models_animation_gpu_skinning" width="80"> | ⭐⭐⭐☆ | 4.5 | 4.5 | [Daniel Holden](https://github.com/orangeduck) |
+| [models_animation_layers](models/models_animation_layers.c) | <img src="models/models_animation_layers.png" alt="models_animation_layers" width="80"> | ⭐⭐⭐⭐️ | 6.5 | 6.5 | [raylib contributors](https://github.com/raysan5/raylib/graphs/contributors) |
 | [models_bone_socket](models/models_bone_socket.c) | <img src="models/models_bone_socket.png" alt="models_bone_socket" width="80"> | ⭐⭐⭐⭐️ | 4.5 | 4.5 | [iP](https://github.com/ipzaur) |
 | [models_tesseract_view](models/models_tesseract_view.c) | <img src="models/models_tesseract_view.png" alt="models_tesseract_view" width="80"> | ⭐⭐☆☆ | 6.0 | 6.0 | [Timothy van der Valk](https://github.com/arceryz) |
 | [models_basic_voxel](models/models_basic_voxel.c) | <img src="models/models_basic_voxel.png" alt="models_basic_voxel" width="80"> | ⭐⭐☆☆ | 5.5 | 5.5 | [Tim Little](https://github.com/timlittle) |

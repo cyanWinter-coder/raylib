@@ -22,6 +22,11 @@ cmake_policy(SET CMP0063 NEW)
 # Anywhere you see include(...) you can check <root>/cmake for that file
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+# Enables CTest for raylib unit tests when raylib is built as the top-level project
+if (PROJECT_IS_TOP_LEVEL)
+  include(CTest)
+endif()
+
 # Sets compiler flags and language standard
 include(CompilerFlags)
 
@@ -52,6 +57,10 @@ endif()
 if (${BUILD_EXAMPLES})
   message(STATUS "Building examples is enabled")
   add_subdirectory(examples)
+endif()
+
+if (BUILD_TESTING AND PROJECT_IS_TOP_LEVEL)
+  add_subdirectory(tests)
 endif()
 
 enable_testing()

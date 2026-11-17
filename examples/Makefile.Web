@@ -654,6 +654,7 @@ MODELS = \
     models/models_animation_blend_custom \
     models/models_animation_blending \
     models/models_animation_gpu_skinning \
+    models/models_animation_layers \
     models/models_animation_timing \
     models/models_basic_voxel \
     models/models_billboard_rendering \
@@ -1262,6 +1263,12 @@ models/models_animation_blending: models/models_animation_blending.c
 models/models_animation_gpu_skinning: models/models_animation_gpu_skinning.c
 	$(CC) -o $@$(EXT) $< $(CFLAGS) $(INCLUDE_PATHS) $(LDFLAGS) $(LDLIBS) -D$(PLATFORM) \
     --preload-file models/resources/models/gltf/greenman.glb@resources/models/gltf/greenman.glb \
+    --preload-file models/resources/shaders/glsl100/skinning.vs@resources/shaders/glsl100/skinning.vs \
+    --preload-file models/resources/shaders/glsl100/skinning.fs@resources/shaders/glsl100/skinning.fs
+
+models/models_animation_layers: models/models_animation_layers.c
+	$(CC) -o $@$(EXT) $< $(CFLAGS) $(INCLUDE_PATHS) $(LDFLAGS) $(LDLIBS) -D$(PLATFORM) \
+    --preload-file models/resources/models/gltf/robot.glb@resources/models/gltf/robot.glb \
     --preload-file models/resources/shaders/glsl100/skinning.vs@resources/shaders/glsl100/skinning.vs \
     --preload-file models/resources/shaders/glsl100/skinning.fs@resources/shaders/glsl100/skinning.fs
 

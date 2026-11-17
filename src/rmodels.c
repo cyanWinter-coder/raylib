@@ -2304,61 +2304,238 @@ ModelAnimation *LoadModelAnimations(const char *fileName, int *animCount)
     return animations;
 }
 
+// Get current and next keyframe indices for a requested animation frame
+static bool GetAnimationFrameSampling(const ModelAnimation *anim, float frame, int *currentFrame, int *nextFrame, float *blend)
+{
+    if ((anim == NULL) || (anim->keyframeCount <= 0) || !isfinite(frame)) return false;
+
+    float wrappedFrame = fmodf(frame, (float)anim->keyframeCount);
+    if (wrappedFrame < 0.0f) wrappedFrame += (float)anim->keyframeCount;
+
+    int frameIndex = (int)wrappedFrame;
+    if (frameIndex >= anim->keyframeCount) frameIndex = anim->keyframeCount - 1;
+
+    *currentFrame = frameIndex;
+    *nextFrame = (frameIndex + 1)%anim->keyframeCount;
+    *blend = Clamp(wrappedFrame - (float)frameIndex, 0.0f, 1.0f);
+
+    return true;
+}
+
+// Get interpolated animation pose for one bone
+static Transform GetAnimationTransform(const ModelAnimation *anim, float frame, unsigned int boneIndex)
+{
+    int currentFrame = 0;
+    int nextFrame = 0;
+    float blend = 0.0f;
+
+    GetAnimationFrameSampling(anim, frame, &currentFrame, &nextFrame, &blend);
+
+    Transform transform = { 0 };
+    transform.translation = Vector3Lerp(anim->keyframePoses[currentFrame][boneIndex].translation,
+        anim->keyframePoses[nextFrame][boneIndex].translation, blend);
+    transform.rotation = QuaternionSlerp(anim->keyframePoses[currentFrame][boneIndex].rotation,
+        anim->keyframePoses[nextFrame][boneIndex].rotation, blend);
+    transform.scale = Vector3Lerp(anim->keyframePoses[currentFrame][boneIndex].scale,
+        anim->keyframePoses[nextFrame][boneIndex].scale, blend);
+
+    return transform;
+}
+
+// Convert a pose transform to a matrix
+static Matrix GetTransformMatrix(Transform transform)
+{
+    return MatrixMultiply(MatrixMultiply(MatrixScale(transform.scale.x, transform.scale.y, transform.scale.z),
+        QuaternionToMatrix(transform.rotation)),
+        MatrixTranslate(transform.translation.x, transform.translation.y, transform.translation.z));
+}
+
+// Divide scale components, using a neutral fallback for zero bind scale
+static Vector3 DivideScaleSafe(Vector3 scale, Vector3 divisor)
+{
+    Vector3 result = { 1.0f, 1.0f, 1.0f };
+
+    if (fabsf(divisor.x) > 0.000001f) result.x = scale.x/divisor.x;
+    if (fabsf(divisor.y) > 0.000001f) result.y = scale.y/divisor.y;
+    if (fabsf(divisor.z) > 0.000001f) result.z = scale.z/divisor.z;
+
+    return result;
+}
+
+// Divide vector components, using zero for zero divisors
+static Vector3 DivideVectorSafe(Vector3 vector, Vector3 divisor)
+{
+    Vector3 result = { 0 };
+
+    if (fabsf(divisor.x) > 0.000001f) result.x = vector.x/divisor.x;
+    if (fabsf(divisor.y) > 0.000001f) result.y = vector.y/divisor.y;
+    if (fabsf(divisor.z) > 0.000001f) result.z = vector.z/divisor.z;
+
+    return result;
+}
+
+// Compose a bind-relative additive pose delta on top of a base pose
+static Transform ComposeAnimationTransform(Transform base, Transform delta)
+{
+    Transform result = { 0 };
+    Vector3 deltaTranslation = Vector3Multiply(base.scale, delta.translation);
+
+    result.translation = Vector3Add(base.translation, Vector3RotateByQuaternion(deltaTranslation, base.rotation));
+    result.rotation = QuaternionNormalize(QuaternionMultiply(base.rotation, delta.rotation));
+    result.scale = Vector3Multiply(base.scale, delta.scale);
+
+    return result;
+}
+
+// Validate layered animation inputs before modifying model runtime data
+static bool IsModelAnimationLayerValid(Model model, const ModelAnimationLayer *layer)
+{
+    if ((layer->animation == NULL) || (layer->animation->keyframePoses == NULL) ||
+        (layer->animation->keyframeCount <= 0) ||
+        (layer->animation->boneCount < model.skeleton.boneCount))
+    {
+        TRACELOG(LOG_WARNING, "ANIMATION: [UpdateModelAnimationBlend] Invalid animation layer "
+            "(animation=%p, keyframes=%i, animationBones=%u, modelBones=%u)",
+            (void *)layer->animation, (layer->animation != NULL)? layer->animation->keyframeCount : 0,
+            (layer->animation != NULL)? layer->animation->boneCount : 0, model.skeleton.boneCount);
+        return false;
+    }
+
+    if (!isfinite(layer->frame) || !isfinite(layer->weight) || (layer->weight < 0.0f))
+    {
+        TRACELOG(LOG_WARNING, "ANIMATION: [UpdateModelAnimationBlend] Invalid layer frame/weight "
+            "(frame=%f, weight=%f)", layer->frame, layer->weight);
+        return false;
+    }
+
+    if ((layer->mode != MODEL_ANIMATION_BLEND_REPLACE) && (layer->mode != MODEL_ANIMATION_BLEND_ADDITIVE))
+    {
+        TRACELOG(LOG_WARNING, "ANIMATION: [UpdateModelAnimationBlend] Invalid blend mode (%i)", (int)layer->mode);
+        return false;
+    }
+
+    return true;
+}
+
+// Update model pose and bone matrices from replace/additive animation layers
+static bool UpdateModelAnimationPose(Model model, const ModelAnimationLayer *layers, int layerCount, bool normalizeWeights)
+{
+    if ((model.currentPose == NULL) || (model.boneMatrices == NULL) ||
+        (model.skeleton.bindPose == NULL) || (model.skeleton.boneCount == 0))
+    {
+        TRACELOG(LOG_WARNING, "ANIMATION: [UpdateModelAnimationBlend] Invalid model animation data "
+            "(bones=%u, bindPose=%p, currentPose=%p, boneMatrices=%p)",
+            model.skeleton.boneCount, (void *)model.skeleton.bindPose,
+            (void *)model.currentPose, (void *)model.boneMatrices);
+        return false;
+    }
+
+    if ((layerCount < 0) || ((layerCount > 0) && (layers == NULL)))
+    {
+        TRACELOG(LOG_WARNING, "ANIMATION: [UpdateModelAnimationBlend] Invalid layer list (count=%i, layers=%p)",
+            layerCount, (void *)layers);
+        return false;
+    }
+
+    for (int layerIndex = 0; layerIndex < layerCount; layerIndex++)
+    {
+        // Disabled layers do not contribute and do not require valid animation data
+        if ((layers[layerIndex].weight != 0.0f) && !IsModelAnimationLayerValid(model, &layers[layerIndex])) return false;
+    }
+
+    for (unsigned int boneIndex = 0; boneIndex < model.skeleton.boneCount; boneIndex++)
+    {
+        Transform bindTransform = model.skeleton.bindPose[boneIndex];
+        Transform currentTransform = bindTransform;
+        float replaceWeight = 0.0f;
+        float accumulatedWeight = 0.0f;
+        bool poseInitialized = false;
+
+        // Compute the total replace weight for this bone after applying masks
+        for (int layerIndex = 0; layerIndex < layerCount; layerIndex++)
+        {
+            const ModelAnimationLayer *layer = &layers[layerIndex];
+            if ((layer->mode != MODEL_ANIMATION_BLEND_REPLACE) || (layer->weight <= 0.0f)) continue;
+            if ((layer->boneMask != NULL) && (layer->boneMask[boneIndex] == 0)) continue;
+
+            replaceWeight += layer->weight;
+        }
+
+        // Unnormalized partial weights leave the remaining influence on the bind pose
+        float bindWeight = 0.0f;
+        if (normalizeWeights) bindWeight = (replaceWeight > 0.0f)? 0.0f : 1.0f;
+        else bindWeight = (replaceWeight < 1.0f)? 1.0f - replaceWeight : 0.0f;
+
+        if (bindWeight > 0.0f)
+        {
+            currentTransform = bindTransform;
+            accumulatedWeight = bindWeight;
+            poseInitialized = true;
+        }
+
+        // Blend replace layers with normalized weighted quaternion/vector accumulation
+        for (int layerIndex = 0; layerIndex < layerCount; layerIndex++)
+        {
+            const ModelAnimationLayer *layer = &layers[layerIndex];
+            if ((layer->mode != MODEL_ANIMATION_BLEND_REPLACE) || (layer->weight <= 0.0f)) continue;
+            if ((layer->boneMask != NULL) && (layer->boneMask[boneIndex] == 0)) continue;
+
+            Transform layerTransform = GetAnimationTransform(layer->animation, layer->frame, boneIndex);
+
+            if (!poseInitialized)
+            {
+                currentTransform = layerTransform;
+                accumulatedWeight = layer->weight;
+                poseInitialized = true;
+            }
+            else
+            {
+                float layerBlend = layer->weight/(accumulatedWeight + layer->weight);
+                currentTransform.translation = Vector3Lerp(currentTransform.translation, layerTransform.translation, layerBlend);
+                currentTransform.rotation = QuaternionSlerp(currentTransform.rotation, layerTransform.rotation, layerBlend);
+                currentTransform.scale = Vector3Lerp(currentTransform.scale, layerTransform.scale, layerBlend);
+                accumulatedWeight += layer->weight;
+            }
+        }
+
+        // Apply additive layers as bind-relative deltas, only where their masks allow it
+        for (int layerIndex = 0; layerIndex < layerCount; layerIndex++)
+        {
+            const ModelAnimationLayer *layer = &layers[layerIndex];
+            if ((layer->mode != MODEL_ANIMATION_BLEND_ADDITIVE) || (layer->weight <= 0.0f)) continue;
+            if ((layer->boneMask != NULL) && (layer->boneMask[boneIndex] == 0)) continue;
+
+            Transform layerTransform = GetAnimationTransform(layer->animation, layer->frame, boneIndex);
+            Quaternion inverseBindRotation = QuaternionInvert(bindTransform.rotation);
+
+            Transform delta = { 0 };
+            delta.translation = Vector3RotateByQuaternion(
+                Vector3Subtract(layerTransform.translation, bindTransform.translation), inverseBindRotation);
+            delta.translation = DivideVectorSafe(delta.translation, bindTransform.scale);
+            delta.rotation = QuaternionMultiply(inverseBindRotation, layerTransform.rotation);
+            delta.scale = DivideScaleSafe(layerTransform.scale, bindTransform.scale);
+
+            delta.translation = Vector3Scale(delta.translation, layer->weight);
+            delta.rotation = QuaternionSlerp(QuaternionIdentity(), delta.rotation, layer->weight);
+            delta.scale = Vector3Lerp((Vector3){ 1.0f, 1.0f, 1.0f }, delta.scale, layer->weight);
+
+            currentTransform = ComposeAnimationTransform(currentTransform, delta);
+        }
+
+        model.currentPose[boneIndex] = currentTransform;
+        model.boneMatrices[boneIndex] = MatrixMultiply(MatrixInvert(GetTransformMatrix(bindTransform)),
+            GetTransformMatrix(currentTransform));
+    }
+
+    return true;
+}
+
 // Update model animation data (bone matrices) for a specific pose
 // NOTE 1: Request frame could be fractional, using a lerp interpolation between two frames
 void UpdateModelAnimationBones(Model model, ModelAnimation anim, float frame)
 {
-    if (model.boneMatrices == NULL) return;
-
-    //UpdateModelAnimationEx(model, anim, frame, anim, frame, 0.0f);
-
-    // Update model animated bones transform matrices for a given frame
-    if ((anim.keyframeCount > 0) && (model.skeleton.bones != NULL) && (anim.keyframePoses != NULL))
-    {
-        // Get frame and blending from frame factor required
-        int currentFrame = (int)frame;
-        int nextFrame = currentFrame + 1;
-        float blend = frame - currentFrame;
-        blend = Clamp(blend, 0.0f, 1.0f);
-        if (currentFrame >= anim.keyframeCount) currentFrame = currentFrame%anim.keyframeCount;
-        if (nextFrame >= anim.keyframeCount) nextFrame = nextFrame%anim.keyframeCount;
-
-        Matrix bindPoseMatrix = { 0 };
-        Matrix currentPoseMatrix = { 0 };
-
-        // Update all bones and bone matrices of model
-        for (unsigned int boneIndex = 0; boneIndex < model.skeleton.boneCount; boneIndex++)
-        {
-            // Compute interpolated pose between current and next frame
-            // NOTE: Storing animation frame data in model.currentPose
-            model.currentPose[boneIndex].translation = Vector3Lerp(
-                anim.keyframePoses[currentFrame][boneIndex].translation,
-                anim.keyframePoses[nextFrame][boneIndex].translation, blend);
-            model.currentPose[boneIndex].rotation = QuaternionSlerp(
-                anim.keyframePoses[currentFrame][boneIndex].rotation,
-                anim.keyframePoses[nextFrame][boneIndex].rotation, blend);
-            model.currentPose[boneIndex].scale = Vector3Lerp(
-                anim.keyframePoses[currentFrame][boneIndex].scale,
-                anim.keyframePoses[nextFrame][boneIndex].scale, blend);
-
-            // Compute runtime bone matrix from model current pose
-            //-----------------------------------------------------------------------------------
-            Transform *bindPoseTransform = &model.skeleton.bindPose[boneIndex];
-            bindPoseMatrix = MatrixMultiply(
-                MatrixMultiply(MatrixScale(bindPoseTransform->scale.x, bindPoseTransform->scale.y, bindPoseTransform->scale.z),
-                    QuaternionToMatrix(bindPoseTransform->rotation)),
-                MatrixTranslate(bindPoseTransform->translation.x, bindPoseTransform->translation.y, bindPoseTransform->translation.z));
-
-            Transform *currentPoseTransform = &model.currentPose[boneIndex];
-            currentPoseMatrix = MatrixMultiply(
-                MatrixMultiply(MatrixScale(currentPoseTransform->scale.x, currentPoseTransform->scale.y, currentPoseTransform->scale.z),
-                    QuaternionToMatrix(currentPoseTransform->rotation)),
-                MatrixTranslate(currentPoseTransform->translation.x, currentPoseTransform->translation.y, currentPoseTransform->translation.z));
-
-            model.boneMatrices[boneIndex] = MatrixMultiply(MatrixInvert(bindPoseMatrix), currentPoseMatrix);
-            //-----------------------------------------------------------------------------------
-        }
-    }
+    ModelAnimationLayer layer = { &anim, frame, 1.0f, NULL, MODEL_ANIMATION_BLEND_REPLACE };
+    UpdateModelAnimationPose(model, &layer, 1, true);
 }
 
 // Update model animation data (vertex buffers / bone matrices) for a specific pose
@@ -2367,10 +2544,10 @@ void UpdateModelAnimationBones(Model model, ModelAnimation anim, float frame)
 // for GPU skinning, bone matrices are uploaded to shader on DrawModelEx()
 void UpdateModelAnimation(Model model, ModelAnimation anim, float frame)
 {
-    if ((anim.keyframeCount > 0) && (model.skeleton.bones != NULL) && (anim.keyframePoses != NULL))
-    {
-        UpdateModelAnimationBones(model, anim, frame);
+    ModelAnimationLayer layer = { &anim, frame, 1.0f, NULL, MODEL_ANIMATION_BLEND_REPLACE };
 
+    if (UpdateModelAnimationPose(model, &layer, 1, true))
+    {
         // CPU skinning, updates CPU buffers and uploads them to GPU
         // NOTE: On GPU skinning not supported, use CPU skinning
         UpdateModelAnimationVertexBuffers(model);
@@ -2382,108 +2559,18 @@ void UpdateModelAnimation(Model model, ModelAnimation anim, float frame)
 // NOTE 1: Request frames could be fractional, using a lerp interpolation between two frames
 void UpdateModelAnimationBonesEx(Model model, ModelAnimation animA, float frameA, ModelAnimation animB, float frameB, float blend)
 {
-    if (model.boneMatrices == NULL) return;
-
-    if ((animA.keyframeCount > 0) && (animA.keyframePoses != NULL) &&
-        (animB.keyframeCount > 0) && (animB.keyframePoses != NULL) &&
-        (blend >= 0.0f) && (blend <= 1.0f))
+    if (!isfinite(blend) || (blend < 0.0f) || (blend > 1.0f))
     {
-        // Inter-frame interpolation values for first animation
-        int currentFrameA = (int)frameA%animA.keyframeCount;
-        int nextFrameA = currentFrameA + 1;
-        float blendA = frameA - currentFrameA;
-        blendA = Clamp(blendA, 0.0f, 1.0f);
-        if (currentFrameA >= animA.keyframeCount) currentFrameA = currentFrameA%animA.keyframeCount;
-        if (nextFrameA >= animA.keyframeCount) nextFrameA = nextFrameA%animA.keyframeCount;
-
-        // Inter-frame interpolation values for second animation
-        int currentFrameB = (int)frameB%animB.keyframeCount;
-        int nextFrameB = currentFrameB + 1;
-        float blendB = frameB - currentFrameB;
-        blendB = Clamp(blendB, 0.0f, 1.0f);
-        if (currentFrameB >= animB.keyframeCount) currentFrameB = currentFrameB%animB.keyframeCount;
-        if (nextFrameB >= animB.keyframeCount) nextFrameB = nextFrameB%animB.keyframeCount;
-
-        Matrix bindPoseMatrix = { 0 };
-        Matrix currentPoseMatrix = { 0 };
-
-        for (unsigned int boneIndex = 0; boneIndex < model.skeleton.boneCount; boneIndex++)
-        {
-            // Get frame-interpolation for first animation
-            Vector3 frameATranslation = Vector3Lerp(
-                animA.keyframePoses[currentFrameA][boneIndex].translation,
-                animA.keyframePoses[nextFrameA][boneIndex].translation, blendA);
-            Quaternion frameARotation = QuaternionSlerp(
-                animA.keyframePoses[currentFrameA][boneIndex].rotation,
-                animA.keyframePoses[nextFrameA][boneIndex].rotation, blendA);
-            Vector3 frameAScale = Vector3Lerp(
-                animA.keyframePoses[currentFrameA][boneIndex].scale,
-                animA.keyframePoses[nextFrameA][boneIndex].scale, blendA);
-
-            // Get frame-interpolation for second animation
-            Vector3 frameBTranslation = Vector3Lerp(
-                animB.keyframePoses[currentFrameB][boneIndex].translation,
-                animB.keyframePoses[nextFrameB][boneIndex].translation, blendB);
-            Quaternion frameBRotation = QuaternionSlerp(
-                animB.keyframePoses[currentFrameB][boneIndex].rotation,
-                animB.keyframePoses[nextFrameB][boneIndex].rotation, blendB);
-            Vector3 frameBScale = Vector3Lerp(
-                animB.keyframePoses[currentFrameB][boneIndex].scale,
-                animB.keyframePoses[nextFrameB][boneIndex].scale, blendB);
-
-            // Compute interpolated pose between both animations frames
-            // NOTE: Storing animation frame data in model.currentPose
-            model.currentPose[boneIndex].translation = Vector3Lerp(frameATranslation, frameBTranslation, blend);
-            model.currentPose[boneIndex].rotation = QuaternionSlerp(frameARotation, frameBRotation, blend);
-            model.currentPose[boneIndex].scale = Vector3Lerp(frameAScale, frameBScale, blend);
-
-            // Compute runtime bone matrix from model current pose
-            //-----------------------------------------------------------------------------------
-            Transform *bindPoseTransform = &model.skeleton.bindPose[boneIndex];
-            bindPoseMatrix = MatrixMultiply(
-                MatrixMultiply(MatrixScale(bindPoseTransform->scale.x, bindPoseTransform->scale.y, bindPoseTransform->scale.z),
-                    QuaternionToMatrix(bindPoseTransform->rotation)),
-                MatrixTranslate(bindPoseTransform->translation.x, bindPoseTransform->translation.y, bindPoseTransform->translation.z));
-
-            Transform *currentPoseTransform = &model.currentPose[boneIndex];
-            currentPoseMatrix = MatrixMultiply(
-                MatrixMultiply(MatrixScale(currentPoseTransform->scale.x, currentPoseTransform->scale.y, currentPoseTransform->scale.z),
-                    QuaternionToMatrix(currentPoseTransform->rotation)),
-                MatrixTranslate(currentPoseTransform->translation.x, currentPoseTransform->translation.y, currentPoseTransform->translation.z));
-
-            model.boneMatrices[boneIndex] = MatrixMultiply(MatrixInvert(bindPoseMatrix), currentPoseMatrix);
-            //-----------------------------------------------------------------------------------
-
-            /*
-            Vector3 outATranslation = animA.keyframePoses[currentFrameA][boneIndex].translation;
-            Quaternion outARotation = animA.keyframePoses[currentFrameA][boneIndex].rotation;
-            Vector3 outAScale = animA.keyframePoses[currentFrameA][boneIndex].scale;
-
-            Vector3 outBTranslation = animB.keyframePoses[currentFrameB][boneIndex].translation;
-            Quaternion outBRotation = animB.keyframePoses[currentFrameB][boneIndex].rotation;
-            Vector3 outBScale = animB.keyframePoses[currentFrameB][boneIndex].scale;
-
-            // Invert bind pose transformation
-            Vector3 invBindTranslation = Vector3RotateByQuaternion(
-                Vector3Negate(model.skeleton.bindPose[boneIndex].translation),
-                QuaternionInvert(model.skeleton.bindPose[boneIndex].rotation));
-            Quaternion invBindRotation = QuaternionInvert(model.skeleton.bindPose[boneIndex].rotation);
-            Vector3 invBindScale = Vector3Divide((Vector3){ 1.0f, 1.0f, 1.0f }, model.skeleton.bindPose[boneIndex].scale);
-
-            Vector3 boneTranslation = Vector3Add(Vector3RotateByQuaternion(
-                Vector3Multiply(model.currentPose[boneIndex].scale, invBindTranslation),
-                    model.currentPose[boneIndex].rotation),
-                    model.currentPose[boneIndex].translation);
-            Quaternion boneRotation = QuaternionMultiply(model.currentPose[boneIndex].rotation, invBindRotation);
-            Vector3 boneScale = Vector3Multiply(model.currentPose[boneIndex].scale, invBindScale);
-
-            model.boneMatrices[boneIndex] = MatrixMultiply(
-                MatrixMultiply(QuaternionToMatrix(boneRotation),
-                    MatrixTranslate(boneTranslation.x, boneTranslation.y, boneTranslation.z)),
-                MatrixScale(boneScale.x, boneScale.y, boneScale.z));
-            */
-        }
+        TRACELOG(LOG_WARNING, "ANIMATION: [UpdateModelAnimationEx] Invalid blend value (blend=%f, expected 0.0..1.0)", blend);
+        return;
     }
+
+    ModelAnimationLayer layers[2] = {
+        { &animA, frameA, 1.0f - blend, NULL, MODEL_ANIMATION_BLEND_REPLACE },
+        { &animB, frameB, blend, NULL, MODEL_ANIMATION_BLEND_REPLACE }
+    };
+
+    UpdateModelAnimationPose(model, layers, 2, true);
 }
 
 // Update model animation data (vertex buffers / bone matrices) for a specific pose,
@@ -2493,16 +2580,31 @@ void UpdateModelAnimationBonesEx(Model model, ModelAnimation animA, float frameA
 // for GPU skinning, bone matrices are uploaded to shader on DrawModelEx()
 void UpdateModelAnimationEx(Model model, ModelAnimation animA, float frameA, ModelAnimation animB, float frameB, float blend)
 {
-    if (model.boneMatrices == NULL) return;
-
-    if ((animA.keyframeCount > 0) && (animA.keyframePoses != NULL) &&
-        (animB.keyframeCount > 0) && (animB.keyframePoses != NULL) &&
-        (blend >= 0.0f) && (blend <= 1.0f))
+    if (!isfinite(blend) || (blend < 0.0f) || (blend > 1.0f))
     {
-        UpdateModelAnimationBonesEx(model, animA, frameA, animB, frameB, blend);
+        TRACELOG(LOG_WARNING, "ANIMATION: [UpdateModelAnimationEx] Invalid blend value (blend=%f, expected 0.0..1.0)", blend);
+        return;
+    }
 
+    ModelAnimationLayer layers[2] = {
+        { &animA, frameA, 1.0f - blend, NULL, MODEL_ANIMATION_BLEND_REPLACE },
+        { &animB, frameB, blend, NULL, MODEL_ANIMATION_BLEND_REPLACE }
+    };
+
+    if (UpdateModelAnimationPose(model, layers, 2, true))
+    {
         // CPU skinning, updates CPU buffers and uploads them to GPU (if available)
         // NOTE: Fallback in case GPU skinning is not supported or enabled
+        UpdateModelAnimationVertexBuffers(model);
+    }
+}
+
+// Update model animation pose using weighted replace/additive layers and optional per-bone masks
+void UpdateModelAnimationBlend(Model model, const ModelAnimationLayer *layers, int layerCount, bool normalizeWeights)
+{
+    if (UpdateModelAnimationPose(model, layers, layerCount, normalizeWeights))
+    {
+        // GPU skinning consumes model.boneMatrices on DrawModelEx(), CPU skinning consumes the same matrices here
         UpdateModelAnimationVertexBuffers(model);
     }
 }
@@ -2513,6 +2615,15 @@ static void UpdateModelAnimationVertexBuffers(Model model)
 {
     static Matrix boneNormalMatrices[256] = { 0 }; // Normal matrix per bone, bone indices are unsigned char
     bool boneNormalsReady = false;
+
+    if (model.meshCount <= 0) return;
+
+    if (model.meshes == NULL)
+    {
+        TRACELOG(LOG_WARNING, "ANIMATION: [UpdateModelAnimationVertexBuffers] Invalid model meshes "
+            "(meshCount=%i, meshes=%p)", model.meshCount, (void *)model.meshes);
+        return;
+    }
 
     for (int m = 0; m < model.meshCount; m++)
     {
@@ -2527,12 +2638,17 @@ static void UpdateModelAnimationVertexBuffers(Model model)
         bool bufferUpdateRequired = false; // Flag to check when anim vertex information is updated
 
         // Skip if missing bone data or missing anim buffers initialization
-        if ((mesh->boneWeights == NULL) || (mesh->boneIndices == NULL)) continue;
+        if ((mesh->vertices == NULL) || (mesh->vertexCount <= 0) ||
+            (mesh->boneWeights == NULL) || (mesh->boneIndices == NULL)) continue;
 
         // Skip if the shader is using the bones directly
 #if SUPPORT_GPU_SKINNING
-        Material material = model.materials[model.meshMaterial[m]];
-        if ((material.shader.locs != NULL) && (material.shader.locs[SHADER_LOC_VERTEX_BONEIDS] != -1)) continue;
+        if ((model.materials != NULL) && (model.meshMaterial != NULL) &&
+            (model.meshMaterial[m] >= 0) && (model.meshMaterial[m] < model.materialCount))
+        {
+            Material material = model.materials[model.meshMaterial[m]];
+            if ((material.shader.locs != NULL) && (material.shader.locs[SHADER_LOC_VERTEX_BONEIDS] != -1)) continue;
+        }
 #endif
         // Lazy allocation of CPU animation buffers for vertex positions and normals, 
         // to be used on CPU software skinning
@@ -2595,13 +2711,68 @@ static void UpdateModelAnimationVertexBuffers(Model model)
             }
         }
 
-        if (bufferUpdateRequired)
+        if (bufferUpdateRequired && (mesh->vboId != NULL) &&
+            (mesh->vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_POSITION] != 0))
         {
             // Update GPU vertex buffers with updated data (position + normals)
             rlUpdateVertexBuffer(mesh->vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_POSITION], mesh->animVertices, mesh->vertexCount*3*sizeof(float), 0);
-            if (mesh->normals != NULL) rlUpdateVertexBuffer(mesh->vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_NORMAL], mesh->animNormals, mesh->vertexCount*3*sizeof(float), 0);
+            if ((mesh->normals != NULL) && (mesh->animNormals != NULL) &&
+                (mesh->vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_NORMAL] != 0))
+            {
+                rlUpdateVertexBuffer(mesh->vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_NORMAL], mesh->animNormals, mesh->vertexCount*3*sizeof(float), 0);
+            }
         }
     }
+}
+
+// Get a vertex position skinned by the current model bone matrices
+// NOTE: This is the CPU reference used by tests, GPU skinning applies the same bone matrices in the vertex shader
+Vector3 GetModelAnimationSkinnedVertex(Model model, int meshIndex, int vertexIndex)
+{
+    if ((model.meshes == NULL) || (meshIndex < 0) || (meshIndex >= model.meshCount))
+    {
+        TRACELOG(LOG_WARNING, "ANIMATION: [GetModelAnimationSkinnedVertex] Invalid mesh index "
+            "(meshIndex=%i, meshCount=%i)", meshIndex, model.meshCount);
+        return Vector3Zero();
+    }
+
+    Mesh *mesh = &model.meshes[meshIndex];
+    if ((mesh->vertices == NULL) || (vertexIndex < 0) || (vertexIndex >= mesh->vertexCount))
+    {
+        TRACELOG(LOG_WARNING, "ANIMATION: [GetModelAnimationSkinnedVertex] Invalid vertex index "
+            "(vertexIndex=%i, vertexCount=%i, vertices=%p)", vertexIndex, mesh->vertexCount, (void *)mesh->vertices);
+        return Vector3Zero();
+    }
+
+    Vector3 vertex = {
+        mesh->vertices[vertexIndex*3],
+        mesh->vertices[vertexIndex*3 + 1],
+        mesh->vertices[vertexIndex*3 + 2]
+    };
+
+    if ((mesh->boneIndices == NULL) || (mesh->boneWeights == NULL) ||
+        (model.boneMatrices == NULL) || (model.skeleton.boneCount == 0)) return vertex;
+
+    Vector3 skinnedVertex = { 0 };
+    for (int boneSlot = 0; boneSlot < 4; boneSlot++)
+    {
+        int boneCounter = vertexIndex*4 + boneSlot;
+        int boneIndex = mesh->boneIndices[boneCounter];
+        float boneWeight = mesh->boneWeights[boneCounter];
+
+        if (boneWeight == 0.0f) continue;
+        if (boneIndex >= (int)model.skeleton.boneCount)
+        {
+            TRACELOG(LOG_WARNING, "ANIMATION: [GetModelAnimationSkinnedVertex] Invalid bone index "
+                "(boneIndex=%i, boneCount=%u, vertexIndex=%i)", boneIndex, model.skeleton.boneCount, vertexIndex);
+            return vertex;
+        }
+
+        Vector3 transformedVertex = Vector3Transform(vertex, model.boneMatrices[boneIndex]);
+        skinnedVertex = Vector3Add(skinnedVertex, Vector3Scale(transformedVertex, boneWeight));
+    }
+
+    return skinnedVertex;
 }
 
 // Unload animation array data

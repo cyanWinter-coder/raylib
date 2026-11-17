@@ -492,6 +492,23 @@
         },
     },
     .{
+        "models_animation_layers",
+        .{
+            .{
+                .src_path = "examples/models/resources/models/gltf/robot.glb",
+                .virtual_path = "resources/models/gltf/robot.glb",
+            },
+            .{
+                .src_path = "examples/models/resources/shaders/glsl100/skinning.vs",
+                .virtual_path = "resources/shaders/glsl100/skinning.vs",
+            },
+            .{
+                .src_path = "examples/models/resources/shaders/glsl100/skinning.fs",
+                .virtual_path = "resources/shaders/glsl100/skinning.fs",
+            },
+        },
+    },
+    .{
         "models_animation_timing",
         .{
             .{

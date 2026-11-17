@@ -441,6 +441,21 @@ typedef struct ModelAnimation {
     ModelAnimPose *keyframePoses; // Animation sequence keyframe poses [keyframe][pose]
 } ModelAnimation;
 
+// Model animation layer blend mode
+typedef enum {
+    MODEL_ANIMATION_BLEND_REPLACE = 0,  // Replace the current pose, weighted with other replace layers
+    MODEL_ANIMATION_BLEND_ADDITIVE = 1  // Add a bind-relative pose delta on top of the current pose
+} ModelAnimationBlendMode;
+
+// ModelAnimationLayer, one animation layer used by UpdateModelAnimationBlend()
+typedef struct ModelAnimationLayer {
+    const ModelAnimation *animation; // Animation to sample (required if weight > 0)
+    float frame;                     // Animation frame, fractional frames are interpolated
+    float weight;                    // Layer weight, negative values are invalid
+    const unsigned char *boneMask;   // Optional per-bone mask, non-zero enables a bone (NULL enables all)
+    ModelAnimationBlendMode mode;    // Layer blending mode
+} ModelAnimationLayer;
+
 // Ray, ray for raycasting
 typedef struct Ray {
     Vector3 position;       // Ray position (origin)
@@ -1661,8 +1676,10 @@ RLAPI void SetModelMeshMaterial(Model *model, int meshId, int materialId);      
 RLAPI ModelAnimation *LoadModelAnimations(const char *fileName, int *animCount);            // Load model animations from file
 RLAPI void UpdateModelAnimation(Model model, ModelAnimation anim, float frame);             // Update model animation pose (vertex buffers and bone matrices)
 RLAPI void UpdateModelAnimationEx(Model model, ModelAnimation animA, float frameA, ModelAnimation animB, float frameB, float blend); // Update model animation pose, blending two animations
+RLAPI void UpdateModelAnimationBlend(Model model, const ModelAnimationLayer *layers, int layerCount, bool normalizeWeights); // Update model animation pose from multiple masked layers
 RLAPI void UnloadModelAnimations(ModelAnimation *animations, int animCount);                // Unload animation array data
 RLAPI bool IsModelAnimationValid(Model model, ModelAnimation anim);                         // Check model animation skeleton match
+RLAPI Vector3 GetModelAnimationSkinnedVertex(Model model, int meshIndex, int vertexIndex);  // Get software-skinned vertex position from current bone matrices
 
 // Collision detection functions
 RLAPI bool CheckCollisionSpheres(Vector3 center1, float radius1, Vector3 center2, float radius2); // Check collision between two spheres
